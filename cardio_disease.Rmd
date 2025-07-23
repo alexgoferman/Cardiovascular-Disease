@@ -1,0 +1,407 @@
+---
+title: "Predictive Modeling of Cardiovascular Conditions"
+author: "Alexander Goferman"
+output: html_notebook
+---
+
+## About the Data and the Analysis
+
+This is an analysis about heart disease. The data, obtained from Kaggle with an undocumented author (found at https://www.kaggle.com/datasets/jocelyndumlao/cardiovascular-disease-dataset), consists of 1000 subjects with 12 features. The data is specific to patients in India and is acquired from one of the multispecialty hospitals in India. The features I've selected to use as predictors are:
+
+Age, a numeric variable (in years)
+
+Gender, a binary variable (male = 1, female = 0)
+
+Resting blood pressure, a numeric variable ranging from 94 to 200 (in mm HG)
+
+Maximum heart rate achieved, a numeric variable ranging from 71 to 202
+
+The response variable is a binary outcome called "disease," which equals 1 if cardiovascular disease is present in a patient and 0 if cardiovascular disease is absent. Because this variable is binary, the models in this analysis will be logistic regression.
+
+```{r setup}
+#Load packages
+library(rstanarm)
+library(rstan)
+library(bayesrules)
+library(bayesplot)
+library(tidyverse)
+library(tidybayes)
+library(broom.mixed)
+library(gridExtra)
+```
+
+## Building the Model
+
+```{r data visualization}
+cardio <- cardio_data %>%
+  select(disease, age, gender, restingBP, maxHR, patientid)
+ggplot(cardio, aes(x = restingBP, y = disease, color = gender)) + 
+  geom_jitter()
+ggplot(cardio, aes(x = maxHR, y = disease, color = gender)) + 
+  geom_jitter()
+ggplot(cardio, aes(x = restingBP, y = disease, color = age)) + 
+  geom_jitter()
+ggplot(cardio, aes(x = maxHR, y = disease, color = age)) + 
+  geom_jitter()
+```
+## Prior Specification
+
+Given that the response variable is binary, logistic regression is appropriate. The variable 'disease' equals 1 if cardiovascular disease is presence, and 0 is cardiovascular disease is absent. It follows a Bernoulli distribution. 
+
+Based on intuition and prior knowledge, we reason that the typical person has a 55% of cardiovascular disease. Therefore, the odds of cardiovascular disease according to this prior understanding are 0.55/(1-0.55) = 0.55/0.45 = 1.22. 
+
+We want to transform these odds such that they have a linear relationship with the predictors, so we take the log of the odds. Indeed, log(1.22) = 0.199, so we take this as the mean of the centered intercept in our model.
+
+We understand that the log(odds) likely range from 0 to 0.398 (i.e. 0.199 +/- 2(0.0995)), so we take 0.0995 to be the standard deviation of the centered intercept.
+
+The coefficients on the predictors will be specified using default priors and autoscaling.
+
+```{r prior specification}
+
+cardio_model_prior <- stan_glm(disease ~ age + gender + restingBP + maxHR,
+                               data = cardio, family = binomial,
+                               prior_intercept = normal(0.199, 0.0995),
+                               prior = normal(0, 2.5, autoscale = TRUE),
+                               chains = 4, iter = 5000*2, seed = 84735)
+```
+```{r prior summary and summary}
+prior_summary(cardio_model_prior)
+```
+## Graphical and Numerical Diagnostics
+
+```{r diagnostics}
+mcmc_trace(cardio_model_prior, size = 0.1)
+```
+
+```{r mcmc density overlay 1}
+mcmc_dens_overlay(cardio_model_prior)
+```
+
+```{r acf plot}
+mcmc_acf(cardio_model_prior)
+```
+
+```{r neff ratio 1}
+neff_ratio(cardio_model_prior)
+```
+
+```{r rhat 1}
+rhat(cardio_model_prior)
+```
+The diagnostics produce optimistic results, although the effective sample size ratios for all coefficients are greater than 1.
+
+## Posterior Simulation
+
+```{r posterior simulation}
+cardio %>%
+  add_fitted_draws(cardio_model_prior, n = 100) %>% 
+  ggplot(aes(x = age, y = disease)) +
+    geom_line(aes(y = .value, group = .draw), alpha = 0.15)
+cardio %>%
+  add_fitted_draws(cardio_model_prior, n = 100) %>% 
+  ggplot(aes(x = gender, y = disease)) +
+    geom_line(aes(y = .value, group = .draw), alpha = 0.15)
+cardio %>%
+  add_fitted_draws(cardio_model_prior, n = 100) %>% 
+  ggplot(aes(x = restingBP, y = disease)) +
+    geom_line(aes(y = .value, group = .draw), alpha = 0.15)
+cardio %>%
+  add_fitted_draws(cardio_model_prior, n = 100) %>% 
+  ggplot(aes(x = maxHR, y = disease)) +
+    geom_line(aes(y = .value, group = .draw), alpha = 0.15)
+
+cardio %>%
+  add_predicted_draws(cardio_model_prior, n = 100) %>% 
+  group_by(.draw) %>% 
+  summarize(proportion_cardio = mean(.prediction == 1)) %>% 
+  ggplot(aes(x = proportion_cardio)) +
+    geom_histogram(color = "black")
+```
+This posterior simulation looks a little crazy, but the variables 'gender', 'restingBP', and 'maxHR' seem to exhibit some kind of trend. The variable 'age' exhibits more uncertainty and lack of relationship.
+
+Now let's see what the coefficient estimates are:
+
+```{r 1}
+tidy(cardio_model_prior, effects = c("fixed"),
+     conf.int = TRUE, conf.level = 0.80) %>%
+  select(-std.error)
+```
+Here is what the model would have been:
+
+log(odds) = -7.989 + 0.0034(age) - 0.1856(gender) + 0.0393(restingBP) + 0.0142(maxHR)
+
+These coefficients represent an effect on the response variable. The following is a summary of the effect each variable has after a one unit increment, (or for the binary variable "gender", the effect if gender = male = 1) all else constant:
+
+age: multiplicative increase of 1.0034, or a 0.34% increase
+gender: multiplicative increase of 0.8306, or a 16.939% decrease
+restingBP = multiplicative increase of 1.0401, or a 4.01% increase
+maxHR: multiplicative increase of 1.0143, or a 1.43% increase
+
+The coefficient (Intercept) represents the odds of cardiovascular disease if all variables were zero, which is e^-0.0747 = 0.00034, or a meaning the probability of absence of cardiovascular disease is higher, given the odds are less than 1.
+
+## Posterior Prediction and Classification
+
+Let's do a posterior predictive check.
+
+```{r pp_check 1}
+pp_check(cardio_model_prior)
+```
+The posterior predictive check actually captures the distribution of the data rather well. Since the outcome is binary, it makes sense that the distribution peaks near 0 and 1.
+
+
+Let's predict the odds of cardiovascular disease at some random values of the predictors.
+
+```{r predict p1 1}
+cardio %>%
+  filter(patientid == 691506) %>%
+  select(age, gender, restingBP, maxHR, disease)
+```
+
+Let's classify.
+
+```{r predict p2 1}
+binary_prediction <- posterior_predict(
+  cardio_model_prior, newdata = data.frame(age = 54, gender = 1, restingBP = 170, maxHR = 140))
+table(binary_prediction)
+```
+This table shows that, given the values age = 54, gender = 1, restingBP = 170, maxHR = 140, 14917 out of 20000 simulated observations (74.59%) called for the presence of cardiovascular disease. In contrast, 5083 out of 20000 simulated observations (25.41%) called for the absence of cardiovascular disease. Thus, a person with the given stats is classified as having heart disease.
+
+## Building an Alternative Model: Interaction
+
+We are interested in comparing our first model with an alternative to see which one is a better fit. One idea is to create an interaction term.
+
+Because in the first model, the coefficient on gender was the only one that actually decreased the chances of cardiovascular disease, and also because of gender's binary nature, it would be wise to have this variable interact with another. A good idea might be to see whether there is interaction between age and gender.
+
+```{r interaction model}
+cardio <- cardio_data %>%
+  select(disease, age, gender, restingBP, maxHR, patientid)
+cardio_model_interact <- stan_glm(disease ~ age + gender + restingBP + maxHR + age:gender,
+                               data = cardio, family = binomial,
+                               prior_intercept = normal(0.199, 0.0995),
+                               prior = normal(0, 2.5, autoscale = TRUE),
+                               chains = 4, iter = 5000*2, seed = 84735)
+```
+```{r summaries 1}
+prior_summary(cardio_model_interact)
+tidy(cardio_model_interact, effects = c("fixed"),
+     conf.int = TRUE, conf.level = 0.80) %>%
+  select(-std.error)
+```
+The new logistic regression model is:
+
+log(odds) = -7.885 + 0.00098(age) + 0.0312(gender) + 0.0394(restingBP) + 0.01414(maxHR) + 0.00315(age:gender)
+
+Now the effects have changed. In this model, gender = male actually increases the odds of cardiovascular disease by 3.169%, and age:gender also has the effect of increasing the odds by 0.3155%.
+
+## Interaction Model Diagnostics
+
+```{r mcmc traceplot 2}
+mcmc_trace(cardio_model_interact, size = 0.1)
+```
+```{r mcmc density overlay 2}
+mcmc_dens_overlay(cardio_model_interact)
+```
+```{r neff ratio 2}
+neff_ratio(cardio_model_interact)
+```
+```{r rhat 2}
+rhat(cardio_model_interact)
+```
+The diagnostics produce optimistic results. The MCMC's seem to be mixing well and quickly, the effective sample size ratios are reasonable, and the r-hat's for all coefficients are very close to 1. This model is already looking like a better fit.
+
+## Posterior Simulation for Interaction Model
+
+```{r posterior simulation 2}
+cardio %>%
+  add_fitted_draws(cardio_model_interact, n = 100) %>% 
+  ggplot(aes(x = age, y = disease)) +
+    geom_line(aes(y = .value, group = .draw), alpha = 0.15)
+cardio %>%
+  add_fitted_draws(cardio_model_interact, n = 100) %>% 
+  ggplot(aes(x = gender, y = disease)) +
+    geom_line(aes(y = .value, group = .draw), alpha = 0.15)
+cardio %>%
+  add_fitted_draws(cardio_model_interact, n = 100) %>% 
+  ggplot(aes(x = restingBP, y = disease)) +
+    geom_line(aes(y = .value, group = .draw), alpha = 0.15)
+cardio %>%
+  add_fitted_draws(cardio_model_interact, n = 100) %>% 
+  ggplot(aes(x = maxHR, y = disease)) +
+    geom_line(aes(y = .value, group = .draw), alpha = 0.15)
+
+cardio %>%
+  add_predicted_draws(cardio_model_interact, n = 100) %>% 
+  group_by(.draw) %>% 
+  summarize(proportion_cardio = mean(.prediction == 1)) %>% 
+  ggplot(aes(x = proportion_cardio)) +
+    geom_histogram(color = "black")
+```
+The posterior simulations look similar to that of the first model. Let's check whether or not the coefficient on the interaction term is significantly different from zero.
+
+```{r coeff check}
+mcmc_areas(cardio_model_interact,
+           pars = c("age:gender"))
+```
+The posterior distribution of this interaction term shows that it might not be substantially different from zero.
+
+## Posterior Prediction and Classification
+
+Let's do a posterior predictive check with this new model.
+
+```{r pp_check 2}
+pp_check(cardio_model_interact)
+```
+Again, the binary nature of the response is captured.
+
+Now let's predict the odds of cardiovascular disease at some random values of the predictors.
+
+```{r predict p1 2}
+cardio %>%
+  filter(patientid == 691506) %>%
+  select(age, gender, restingBP, maxHR, disease)
+```
+```{r predict p2 2}
+binary_prediction <- posterior_predict(
+  cardio_model_interact, newdata = data.frame(age = 54, gender = 1, restingBP = 170, maxHR = 140))
+table(binary_prediction)
+```
+According to the table, 5231 out of 20000 simulated observation under this model (26.2%) called on the absence of cardiovascular disease under these stats. Meanwhile, 14769 out of 20000 simulated observation under this model (73.8%) called on the presence of cardiovascular disease. Thus, a person with the given stats is classified as having heart disease.
+
+## Building an Alternative Model: Hierarchical
+
+In light of the inference regarding the coefficient on the interaction term, I would like to try one more alternative model: a hierarchical model. For this model, I am going to use a categorical grouping variable, one that I have not yet used but will now be extracting from the dataset. This new variable is "chest pain type," which follows the following rule:
+
+chestpain = 0 if the pain is "typical angina"
+
+chestpain = 1 if the pain is "atypical angina"
+
+chestpain = 2 if the pain is "non-anginal pain"
+
+chestpain = 3 if the pain is "asymptomatic"
+
+```{r hierarchical model}
+cardio <- cardio_data %>%
+  select(disease, age, gender, restingBP, maxHR, chestpain, patientid)
+cardio_model_hierarchical <- stan_glmer(disease ~ age + gender + restingBP + maxHR + (1|chestpain),
+                               data = cardio, family = binomial,
+                               prior_intercept = normal(0.199, 0.0995),
+                               prior = normal(0, 2.5, autoscale = TRUE),
+                               prior_covariance = decov(reg = 1, conc = 1, shape = 1, scale = 1),
+                               chains = 4, iter = 5000*2, seed = 84735)
+```
+```{r summaries 3}
+prior_summary(cardio_model_hierarchical)
+tidy(cardio_model_hierarchical, effects = c("fixed"),
+     conf.int = TRUE, conf.level = 0.80) %>%
+  select(-std.error)
+```
+The new logistic regression model is:
+
+log(odds) = -8.332 - 0.0001196(age) + 0.13399(gender) + 0.0429(restingBP) + 0.0133(maxHR)
+
+Now more coefficients change. Whereas as in both of the previous models, the coefficient on age has been positive, now it it negative, representing a multiplicative increase in the odds of cardiovascular disease by a factor of 0.99988, or a 0.01196% decrease.
+
+## Hierarchical Model Diagnostics
+
+```{r mcmc traceplot 3}
+mcmc_trace(cardio_model_hierarchical, size = 0.1)
+```
+
+```{r mcmc density overlay 3}
+mcmc_dens_overlay(cardio_model_hierarchical)
+```
+
+```{r neff ratio 3}
+neff_ratio(cardio_model_hierarchical)
+```
+
+```{r rhat 3}
+rhat(cardio_model_hierarchical)
+```
+The diagnostics still look optimistic, albeit different from what we're used to with the previous two models. The MCMC's seems to be mixing well and quickly, the effective sample size ratios are all not too far from 1, and the r-hat's are close to 1 as well.
+
+## Posterior Predictive Check
+
+```{r pp_check 3}
+pp_check(cardio_model_hierarchical)
+```
+As seen from the posterior predictive check for this hierarchical model, the simulation mimics the data's distribution closely.
+
+
+## Model Evaluations for all Three Models
+
+We will now perform 10-fold cross validation for each model, starting with "cardio_model_prior", then "cardio_model_interact", and lastly "cardio_model_hierarchical".
+
+```{r first model cv}
+set.seed(84735)
+
+cardio1 <- cardio_data %>%
+  select(disease, age, gender, restingBP, maxHR, patientid)
+
+cv_accuracy_1 <- classification_summary_cv(
+  model = cardio_model_prior, data = cardio1, cutoff = 0.5, k = 10)
+
+cv_accuracy_1$cv
+```
+
+```{r second model cv}
+set.seed(84735)
+
+cv_accuracy_2 <- classification_summary_cv(
+  model = cardio_model_interact, data = cardio1, cutoff = 0.5, k = 10)
+
+cv_accuracy_2$cv
+```
+
+```{r third model cv}
+set.seed(84735)
+
+cardio2 <- cardio_data %>%
+  select(disease, age, gender, restingBP, maxHR, chestpain, patientid)
+
+classification_summary(data = cardio2, model = cardio_model_hierarchical, cutoff = 0.5)
+```
+According to these classification cross-validation summaries, the hierarchical model has the highest overall accuracy, placing it as a candidate for best fitting model.
+
+Let's use the Leave-One-Out diagnostic to compare the ELPD of each model.
+
+```{r loo and elpd}
+set.seed(84735)
+
+first_elpd <- loo(cardio_model_prior)
+interact_elpd <- loo(cardio_model_interact)
+hierarchical_elpd <- loo(cardio_model_hierarchical)
+
+first_elpd$estimates
+```
+
+```{r interact elpd}
+interact_elpd$estimates
+```
+
+```{r hierarchical elpd}
+hierarchical_elpd$estimates
+```
+The ELPD diagnostic is meant to be interpretted relatively. We have three ELPD's, and the highest one is the "best" one. In our case, the hiararchical model has the highest ELPD of -395.936.
+
+In light of the cross-validation and ELPD computation, we arrive at the conclusion that the hierarchical model is the most fitting for this data analysis.
+
+## Summary
+
+In summary, the best fitting logistic regression model is:
+
+log(odds) = -8.332 - 0.0001196(age) + 0.13399(gender) + 0.0429(restingBP) + 0.0133(maxHR)
+
+According to the model, the higher a person's age, the less likely they are to have cardiovascular disease. Males are more likely to have cardiovascular disease than women. The higher a person's resting blood pressure and maximum heart rate achieved are, the most likely they are to have cardiovascular disease. When all of these variables equal zero, the odds of cardiovascular disease multiply by a factor of 0.00024, i.e., a 99.976% decrease.
+
+This model is hierarchical, with grouping done by chest pain type, which the following chest pain categories:
+
+"typical angina"
+
+"atypical angina"
+
+"non-anginal pain"
+
+"asymptomatic"
+  
+This hierarchical had the highest overall accuracy from cross-validation and the highest ELPD relative to the original and interaction models, thus we have deemed it to be the best fit of the three. 
